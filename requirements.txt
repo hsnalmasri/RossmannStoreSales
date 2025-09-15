@@ -1,0 +1,14 @@
+﻿numpy==1.26.4
+scipy==1.13.1
+cython==0.29.36
+pmdarima==2.0.4
+
+pandas>=2.2
+matplotlib>=3.8
+seaborn>=0.13
+scikit-learn>=1.4
+statsmodels>=0.14
+jupyterlab>=4.2
+ipykernel>=6.29
+python-dotenv>=1.0
+plotly>=5.22

@@ -1,0 +1,22 @@
+﻿# venv / editors / cache
+.venv/
+__pycache__/
+*.pyc
+.DS_Store
+.vscode/
+.ipynb_checkpoints/
+
+# data & models (keep big files out of git)
+data/raw/
+data/interim/
+data/external/
+models/
+# keep processed small CSVs if you need:
+# !data/processed/*.csv
+
+# creds
+.env
+*.env
+*.key
+*.pem
+*.pfx
