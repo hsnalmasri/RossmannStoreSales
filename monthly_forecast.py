@@ -41,9 +41,10 @@ def load_prepared(sales_csv: str | Path, store_csv: str | Path,
 
 def make_monthly_series(df: pd.DataFrame, store: int | None = None,
                         agg: str = 'sum') -> pd.Series:
-    """Aggregate to monthly series.
+    """
+    Aggregate to monthly series.
     - If store is None: aggregates all stores.
-    - agg: 'sum' (default), 'mean' as needed.
+    - agg: 'sum' (default) or 'mean'.
     Returns a Series with monthly frequency (month end) named 'Sales'.
     """
     dff = df.copy()
@@ -51,7 +52,6 @@ def make_monthly_series(df: pd.DataFrame, store: int | None = None,
         dff = dff[dff['Store'] == store]
     dff = dff.sort_values('Date')
     y = dff.set_index('Date')['Sales']
-    # ensure numeric
     y = pd.to_numeric(y, errors='coerce').fillna(0)
     y_m = y.resample('M').sum() if agg == 'sum' else y.resample('M').mean()
     y_m.name = 'Sales'
@@ -59,23 +59,37 @@ def make_monthly_series(df: pd.DataFrame, store: int | None = None,
 
 
 def fit_arima(y: pd.Series, seasonal: bool = True, m: int = 12):
-    """Fit auto_arima to a monthly series y."""
-    order = (1,1,1)
-    seasonal_order = (1,1,1,m) if seasonal else (0,0,0,0)
-    model = SARIMAX(y, order=order, seasonal_order=seasonal_order,
-                    enforce_stationarity=False, enforce_invertibility=False).fit(disp=False)
+    """
+    Fit a SARIMAX model (ARIMA with optional seasonality).
+    Default order is (1,1,1) and seasonal (1,1,1,m) if seasonal=True.
+    """
+    order = (1, 1, 1)
+    seasonal_order = (1, 1, 1, m) if seasonal else (0, 0, 0, 0)
+    model = SARIMAX(
+        y,
+        order=order,
+        seasonal_order=seasonal_order,
+        enforce_stationarity=False,
+        enforce_invertibility=False,
+    ).fit(disp=False)
     return model
 
 
 def make_fig_actual_fitted_forecast(y: pd.Series, model, horizon: int = 3) -> go.Figure:
-    """Return a Plotly figure with Actual, Fitted (in-sample), and Forecast (+CI)."""
+    """
+    Return a Plotly figure with Actual, Fitted (in-sample), and Forecast (+CI).
+    """
     # In-sample fitted
-    itted = pd.Series(model.fittedvalues, index=y.index, name='Fitted')
+    fitted = pd.Series(model.fittedvalues, index=y.index, name='Fitted')
 
     # Forecast with confidence intervals
     fc_res = model.get_forecast(steps=horizon)
-    fc = fc_res.predicted_mean
+    fc = fc_res.predicted_mean.rename('Forecast')
     ci = fc_res.conf_int()
+
+    # Grab first two columns as lower/upper (names vary by statsmodels version)
+    lower = ci.iloc[:, 0]
+    upper = ci.iloc[:, 1]
 
     fig = go.Figure()
     fig.add_trace(go.Scatter(x=y.index, y=y.values, mode='lines', name='Actual'))
@@ -83,8 +97,8 @@ def make_fig_actual_fitted_forecast(y: pd.Series, model, horizon: int = 3) -> go
     fig.add_trace(go.Scatter(x=fc.index, y=fc.values, mode='lines', name='Forecast'))
     fig.add_trace(
         go.Scatter(
-            x=list(ci.index) + list(ci.index[::-1]),
-            y=list(ci['upper']) + list(ci['lower'][::-1]),
+            x=list(lower.index) + list(upper.index[::-1]),
+            y=list(upper.values) + list(lower.values[::-1]),
             fill='toself',
             name='Forecast CI',
             hoverinfo='skip',
@@ -111,15 +125,12 @@ def run_example(
     m: int = 12,
 ):
     df = load_prepared(sales_csv, store_csv, keep_closed_days=True)
-    y = make_monthly_series(df, store=store, agg='sum')
-    y = y.asfreq('M').fillna(0)
+    y = make_monthly_series(df, store=store, agg='sum').asfreq('M').fillna(0)
     model = fit_arima(y, seasonal=seasonal, m=m)
     fig = make_fig_actual_fitted_forecast(y, model, horizon=horizon)
     return fig, y, model
 
 
 if __name__ == '__main__':
-    # quick manual test
     fig, y, model = run_example()
-    # To view: fig.show()
     print(model.summary())
