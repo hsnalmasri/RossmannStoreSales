@@ -4,7 +4,7 @@ import pandas as pd
 import numpy as np
 from pathlib import Path
 import plotly.graph_objects as go
-from pmdarima import auto_arima
+from statsmodels.tsa.statespace.sarimax import SARIMAX
 
 # If you already have src/data_prep.load_rossmann_data, reuse it.
 try:
@@ -60,29 +60,22 @@ def make_monthly_series(df: pd.DataFrame, store: int | None = None,
 
 def fit_arima(y: pd.Series, seasonal: bool = True, m: int = 12):
     """Fit auto_arima to a monthly series y."""
-    model = auto_arima(
-        y,
-        seasonal=seasonal,
-        m=m,
-        information_criterion='aic',
-        error_action='ignore',
-        suppress_warnings=True,
-        stepwise=True,
-        with_intercept=True,
-    )
+    order = (1,1,1)
+    seasonal_order = (1,1,1,m) if seasonal else (0,0,0,0)
+    model = SARIMAX(y, order=order, seasonal_order=seasonal_order,
+                    enforce_stationarity=False, enforce_invertibility=False).fit(disp=False)
     return model
 
 
 def make_fig_actual_fitted_forecast(y: pd.Series, model, horizon: int = 3) -> go.Figure:
     """Return a Plotly figure with Actual, Fitted (in-sample), and Forecast (+CI)."""
     # In-sample fitted
-    fitted = pd.Series(model.predict_in_sample(), index=y.index, name='Fitted')
+    itted = pd.Series(model.fittedvalues, index=y.index, name='Fitted')
 
     # Forecast with confidence intervals
-    fc, conf = model.predict(n_periods=horizon, return_conf_int=True)
-    idx_fc = pd.period_range(y.index[-1].to_period('M').asfreq('M') + 1, periods=horizon, freq='M').to_timestamp('M')
-    fc = pd.Series(fc, index=idx_fc, name='Forecast')
-    ci = pd.DataFrame(conf, index=idx_fc, columns=['lower', 'upper'])
+    fc_res = model.get_forecast(steps=horizon)
+    fc = fc_res.predicted_mean
+    ci = fc_res.conf_int()
 
     fig = go.Figure()
     fig.add_trace(go.Scatter(x=y.index, y=y.values, mode='lines', name='Actual'))
