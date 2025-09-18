@@ -12,3 +12,5 @@ jupyterlab>=4.2
 ipykernel>=6.29
 python-dotenv>=1.0
 plotly>=5.22
+streamlit
+
