@@ -29,16 +29,24 @@ with st.sidebar:
         store_path = st.text_input('StoreData.csv path', 'data/RAW/StoreData.csv')
     else:
         st.caption('Reading from Streamlit secrets (see `.streamlit/secrets.toml`).')
-        # Optional preview of the domain only (don’t print full URLs if you don’t want to)
+        # Show domains (not full URLs)
         try:
-            _su = st.secrets['data'].get('sales_url', '')
-            _tu = st.secrets['data'].get('store_url', '')
-            if _su:
-                st.write('Sales URL domain:', pd.io.common.urlparse(_su).netloc)
-            if _tu:
-                st.write('Store URL domain:', pd.io.common.urlparse(_tu).netloc)
+            import urllib.parse as _url
+            # support both nested and flat secrets keys
+            sales_guess = (
+                st.secrets.get('data', {}).get('sales_url')
+                or st.secrets.get('DATA_URL_SALES')
+            )
+            store_guess = (
+                st.secrets.get('data', {}).get('store_url')
+                or st.secrets.get('DATA_URL_STORE')
+            )
+            if sales_guess:
+                st.write('Sales URL domain:', _url.urlparse(sales_guess).netloc)
+            if store_guess:
+                st.write('Store URL domain:', _url.urlparse(store_guess).netloc)
         except Exception:
-            st.info('Add keys data.sales_url and data.store_url to secrets.')
+            st.info('Add either data.sales_url / data.store_url OR DATA_URL_SALES / DATA_URL_STORE to secrets.')
 
     st.header('Series Build')
     agg_choice = st.radio('Monthly aggregation', ['sum', 'mean'], index=0, horizontal=True)
@@ -72,6 +80,7 @@ with st.sidebar:
 
 @st.cache_data(show_spinner=True)
 def load_from_urls(sales_url: str, store_url: str, keep_closed_days: bool = True) -> pd.DataFrame:
+    # Pandas can read GitHub Release direct links.
     sales = pd.read_csv(sales_url, parse_dates=['Date'], low_memory=False)
     store = pd.read_csv(store_url)
     df = sales.merge(store[['Store']], on='Store', how='left')
@@ -87,11 +96,15 @@ def load_from_local(sales_path: str, store_path: str) -> pd.DataFrame:
 # Choose loader based on sidebar selection
 try:
     if src == 'Secrets URLs':
-        sales_url = st.secrets['data']['sales_url']
-        store_url = st.secrets['data']['store_url']
+        # Support both nested and flat keys for convenience
+        sales_url = st.secrets.get('data', {}).get('sales_url') or st.secrets['DATA_URL_SALES']
+        store_url = st.secrets.get('data', {}).get('store_url') or st.secrets['DATA_URL_STORE']
         df = load_from_urls(sales_url, store_url, keep_closed_days=True)
     else:
         df = load_from_local(sales_path, store_path)
+except KeyError as e:
+    st.error(f"Missing secret key: {e}. Expected either data.sales_url / data.store_url OR DATA_URL_SALES / DATA_URL_STORE.")
+    st.stop()
 except Exception as e:
     st.error(f"Failed to load data: {e}")
     st.stop()
