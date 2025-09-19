@@ -1,180 +1,94 @@
 # ets_stepwise.py
+from __future__ import annotations
+
+import math
+from typing import Dict, Any
+
 import numpy as np
 import pandas as pd
-from typing import Optional, Dict, Any
 from statsmodels.tsa.holtwinters import ExponentialSmoothing
 
 
-class ETSDataError(ValueError):
-    pass
+def _fit_single(y: pd.Series, cfg: Dict[str, Any]):
+    """
+    Internal: fit an ETS model with the given config on a Series y.
+    Assumes y is monthly (MS) indexed and non-empty.
+    """
+    model = ExponentialSmoothing(
+        y,
+        trend=cfg.get("trend", "add"),
+        seasonal=cfg.get("seasonal", "add"),
+        seasonal_periods=cfg.get("seasonal_periods", 12),
+        damped_trend=cfg.get("damped_trend", True),
+        initialization_method="estimated",
+    )
+    return model.fit(optimized=not cfg.get("manual", False))
 
 
-def _ensure_monthly_index(y: pd.Series) -> pd.Series:
-    if not isinstance(y.index, pd.DatetimeIndex):
-        raise ETSDataError("Input series index must be a pandas.DatetimeIndex.")
-    # Coerce to Month Start if needed
-    if y.index.freq is None:
-        # Try to infer; if still None, resample to monthly start
-        try:
-            y = y.asfreq('MS')
-        except Exception:
-            y = y.resample('MS').sum()
-    elif y.index.freqstr not in ('MS', 'M'):
-        # Normalize to Month Start
-        y = y.asfreq('MS')
-    return y
+def _metrics(y_true: pd.Series, y_pred: pd.Series) -> Dict[str, float]:
+    """
+    Basic holdout metrics. (NaNs in denominators are ignored in MAPE.)
+    """
+    e = y_true - y_pred
+    mae = float(e.abs().mean())
+    rmse = float(math.sqrt((e**2).mean()))
+    mape = float((e.abs() / y_true.replace(0, np.nan)).mean() * 100)
+    return {"mae": mae, "rmse": rmse, "mape": mape}
 
 
-def _apply_transform(y: pd.Series, transform: Optional[str]) -> pd.Series:
-    if transform is None:
-        return y
-    if transform == 'log1p':
-        if (y < 0).any():
-            raise ETSDataError("log1p transform requires non-negative data.")
-        return np.log1p(y)
-    raise ETSDataError(f"Unsupported transform: {transform}")
-
-
-def _inverse_transform(x: pd.Series, transform: Optional[str]) -> pd.Series:
-    if transform is None:
-        return x
-    if transform == 'log1p':
-        return np.expm1(x)
-    return x  # fallback
-
-
-def fit_ets_holdout(
+def fit_and_backtest_ets(
     y: pd.Series,
-    n_forecast: int = 6,
-    *,
-    trend: Optional[str] = "add",              # "add" | "mul" | None
-    seasonal: Optional[str] = "add",           # "add" | "mul" | None
-    seasonal_periods: Optional[int] = 12,
-    damped_trend: bool = False,
-    initialization_method: str = "estimated",
-    optimized: bool = True,
-    smoothing_level: Optional[float] = None,
-    smoothing_trend: Optional[float] = None,
-    smoothing_seasonal: Optional[float] = None,
-    damping_trend: Optional[float] = None,
-    transform: Optional[str] = None,           # None | "log1p"
-    remove_bias: bool = False,
+    n_test: int = 6,
+    cfg: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
     """
-    Fit an ETS model with a simple holdout backtest on the last `n_forecast` periods.
-    Returns data only (no plotting).
+    Fit ETS on the training part (y[:-n_test]), forecast the next n_test months,
+    and return DATA ONLY (no plotting).
 
-    Output dict keys:
-      - 'y_train', 'y_test'
-      - 'fitted' (in-sample one-step-ahead on train)
-      - 'forecast' (out-of-sample length n_forecast)
-      - 'residuals' (train residuals)
-      - 'metrics' (mae/mape/rmse on test if test exists)
-      - 'components' (level, trend, season on model scale)
-      - 'model_info' (config, params, aic/bic, transform)
+    Returns dict:
+        {
+            "y_train": pd.Series,
+            "y_test": pd.Series,
+            "fitted": pd.Series,     # in-sample fitted values (train)
+            "forecast": pd.Series,   # holdout predictions aligned to y_test index
+            "params_used": dict,
+            "metrics": {"mae":..., "rmse":..., "mape":...},
+        }
     """
+    if cfg is None:
+        cfg = {}
+
     if not isinstance(y, pd.Series):
-        raise ETSDataError("`y` must be a pandas Series.")
+        y = pd.Series(y.squeeze(), index=getattr(y, "index", None), name="y")
 
-    y = y.sort_index()
-    y = _ensure_monthly_index(y)
+    if n_test <= 0 or n_test >= len(y):
+        raise ValueError("n_test must be between 1 and len(y)-1")
 
-    if seasonal == "mul" or trend == "mul":
-        if (y <= 0).any():
-            raise ETSDataError("Multiplicative components require strictly positive data.")
+    y_train = y.iloc[:-n_test]
+    y_test = y.iloc[-n_test:]
 
-    if n_forecast < 0 or n_forecast >= len(y):
-        raise ETSDataError("`n_forecast` must be >= 0 and less than the length of `y`.")
+    fit = _fit_single(y_train, cfg)
 
-    # Split
-    y_train = y.iloc[:-n_forecast] if n_forecast > 0 else y.copy()
-    y_test = y.iloc[-n_forecast:] if n_forecast > 0 else pd.Series(dtype=y.dtype)
-
-    # Apply transform (if any)
-    y_train_t = _apply_transform(y_train, transform)
-
-    # Build and fit model
-    model = ExponentialSmoothing(
-        y_train_t,
-        trend=trend,
-        seasonal=seasonal,
-        seasonal_periods=seasonal_periods,
-        damped_trend=damped_trend,
-        initialization_method=initialization_method,
-    )
-
-    fit = model.fit(
-        optimized=optimized,
-        smoothing_level=smoothing_level,
-        smoothing_trend=smoothing_trend,
-        smoothing_seasonal=smoothing_seasonal,
-        damping_trend=damping_trend,
-        remove_bias=remove_bias,
-    )
-
-    # In-sample fitted (on model scale), residuals
-    fitted_t = fit.fittedvalues
-    resid_t = fit.resid
-
-    # Forecast on model scale
-    fcst_t = fit.forecast(n_forecast) if n_forecast > 0 else pd.Series(dtype=y.dtype)
-
-    # Inverse transform back to original scale (for user consumption)
-    fitted = _inverse_transform(fitted_t, transform)
-    forecast = _inverse_transform(fcst_t, transform)
-    residuals = y_train - fitted.reindex(y_train.index, fill_value=np.nan)
-
-    # Basic metrics on test (if present)
-    metrics = {}
-    if n_forecast > 0 and len(y_test) == n_forecast:
-        # Align forecast index to y_test if needed
-        forecast = forecast.set_axis(y_test.index)
-        err = y_test - forecast
-        mae = err.abs().mean()
-        rmse = np.sqrt((err**2).mean())
-        # Safe MAPE (ignore zeros)
-        mask = y_test != 0
-        mape = (err[mask].abs() / y_test[mask]).mean() * 100 if mask.any() else np.nan
-        metrics = {"mae": float(mae), "rmse": float(rmse), "mape": float(mape)}
-
-    # Components (note: components are on model scale; we keep them as-is)
-    components = {
-        "level": getattr(fit, "level", None),
-        "trend": getattr(fit, "trend", None),
-        "season": getattr(fit, "season", None),
-    }
-
-    model_info = {
-        "aic": getattr(fit, "aic", None),
-        "bic": getattr(fit, "bic", None),
-        "sse": getattr(fit, "sse", None),
-        "params": {
-            "alpha": getattr(fit, "model", None) and fit.params.get("smoothing_level"),
-            "beta": getattr(fit, "model", None) and fit.params.get("smoothing_trend"),
-            "gamma": getattr(fit, "model", None) and fit.params.get("smoothing_seasonal"),
-            "phi": getattr(fit, "model", None) and fit.params.get("damping_trend"),
-        },
-        "config": {
-            "trend": trend,
-            "seasonal": seasonal,
-            "seasonal_periods": seasonal_periods,
-            "damped_trend": damped_trend,
-            "initialization_method": initialization_method,
-            "optimized": optimized,
-            "remove_bias": remove_bias,
-            "transform": transform,
-            "n_forecast": n_forecast,
-        },
-        "model_scale": "log1p" if transform == "log1p" else "raw",
-    }
+    fitted_vals = pd.Series(fit.fittedvalues, index=y_train.index, name="fitted")
+    fcst = fit.forecast(n_test)
+    fcst.index = y_test.index
+    fcst.name = "forecast"
 
     return {
         "y_train": y_train,
         "y_test": y_test,
-        "fitted": fitted,
-        "forecast": forecast,
-        "residuals": residuals,
-        "metrics": metrics,
-        "components": components,
-        "model_info": model_info,
+        "fitted": fitted_vals,
+        "forecast": fcst,
+        "params_used": {
+            "trend": cfg.get("trend", "add"),
+            "seasonal": cfg.get("seasonal", "add"),
+            "seasonal_periods": cfg.get("seasonal_periods", 12),
+            "damped_trend": cfg.get("damped_trend", True),
+        },
+        "metrics": _metrics(y_test, fcst),
     }
+
+
+# --- Backwards-compat alias if older code imports this name ---
+def fit_ets_holdout(*args, **kwargs):
+    return fit_and_backtest_ets(*args, **kwargs)

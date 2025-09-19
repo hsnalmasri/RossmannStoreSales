@@ -1,7 +1,14 @@
+# Python
 __pycache__/
 *.pyc
 .venv/
 .env
-.vscode/
-.streamlit/ # keep secrets out of git (but you’ll still create it locally)
-data/RAW/*
+.ipynb_checkpoints/
+
+# Data / models
+data/
+models/
+reports/
+
+# Streamlit
+.streamlit/secrets.toml
