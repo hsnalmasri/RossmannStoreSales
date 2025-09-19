@@ -20,21 +20,23 @@ with st.sidebar:
         options=["Exponential Smoothing (ETS)"],
         index=0,
         label_visibility="collapsed",
+        key="nav_radio",
     )
 
 # -------------------------
-# Simple router
+# Simple router (no page_link)
 # -------------------------
-
-
 if page == "Exponential Smoothing (ETS)":
+    # Try to switch to the Streamlit page file under /pages
     if hasattr(st, "switch_page"):
         try:
             st.switch_page("pages/1_Exponential_Smoothing.py")
         except Exception:
-            st.error("Navigation failed. Open the page from the default sidebar list on the left.")
+            st.error(
+                "Navigation failed. From the left sidebar, open **pages/1_Exponential_Smoothing.py**."
+            )
     else:
         st.info(
-            "Your Streamlit version doesn't support `switch_page`. "
-            "Please open **pages/1_Exponential_Smoothing.py** from the built-in sidebar pages list."
+            "This Streamlit version doesn't support `switch_page`. "
+            "Open **pages/1_Exponential_Smoothing.py** from the built-in sidebar pages list."
         )
