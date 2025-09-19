@@ -209,9 +209,10 @@ def fit_and_backtest_ets(
     y_fc = invert_stepwise_from_diff(last_y, dy_fc)
     level_fc = inv_log1p(y_fc)
 
-    # Build test target for comparison (exclude the anchor point)
-    s_test_eval = s.loc[s.index.get_loc(split_idx) + 1:]
-    s_test_eval = s_test_eval.iloc[:steps]
+    # Build test target for comparison (exclude the anchor point) - FIXED
+    # Use iloc to get positional indexing, then convert back to datetime indexing
+    split_pos = s.index.get_loc(split_idx)
+    s_test_eval = s.iloc[split_pos + 1:split_pos + 1 + steps]
 
     # Metrics
     metrics = {
