@@ -10,34 +10,40 @@ st.write(
     "parameters, run a **backtest** on monthly data, and generate a **forward forecast**."
 )
 
+def _safe_page_link():
+    """Try page_link; if it fails, try switch_page; else show a plain markdown item."""
+    shown = False
+    # 1) Try st.page_link (Streamlit ≥ 1.31) — may fail in some environments
+    if hasattr(st, "page_link"):
+        try:
+            st.page_link("pages/1_Exponential_Smoothing.py", label="📈 Exponential Smoothing (ETS)")
+            shown = True
+        except Exception:
+            shown = False
+    # 2) Fallback: button + switch_page
+    if not shown:
+        col1, _ = st.columns([1, 3])
+        with col1:
+            if st.button("📈 Open Exponential Smoothing (ETS)"):
+                if hasattr(st, "switch_page"):
+                    try:
+                        st.switch_page("pages/1_Exponential_Smoothing.py")
+                    except Exception:
+                        # Last resort: do nothing; Streamlit will still list the page in its built-in sidebar
+                        pass
+                # If no switch_page, we just rely on the built-in multi-page sidebar
+    # 3) Always render a plain list item so something is visible
+    st.markdown("- 📈 Exponential Smoothing (ETS) — also available in the left sidebar pages list.")
+
 # --- Sidebar quick nav ---
 with st.sidebar:
     st.header("Pages")
-    # Prefer st.page_link if available (Streamlit >= 1.31), else fallback.
-    if hasattr(st, "page_link"):
-        st.page_link("pages/1_Exponential_Smoothing.py", label="📈 Exponential Smoothing (ETS)")
-    else:
-        st.markdown(
-            "- 📈 [Exponential Smoothing (ETS)](pages/1_Exponential_Smoothing.py)",
-            unsafe_allow_html=True,
-        )
+    _safe_page_link()
 
 st.markdown(
     """
 ### Pages
 Below are the available pages in this app:
-
-- 📈 **Exponential Smoothing (ETS):** test vs. forecast on monthly-aggregated Sales.
-
-> (More coming soon: segmentation overview, promo impact, competition effects, etc.)
 """
 )
-
-# Also show a big button / link in main content for quick access
-if hasattr(st, "page_link"):
-    st.page_link("pages/1_Exponential_Smoothing.py", label="➡️ Go to **Exponential Smoothing (ETS)**")
-else:
-    st.markdown(
-        '<p><a href="pages/1_Exponential_Smoothing.py">➡️ Go to <b>Exponential Smoothing (ETS)</b></a></p>',
-        unsafe_allow_html=True,
-    )
+_safe_page_link()
