@@ -3,6 +3,9 @@ import pandas as pd
 import numpy as np
 from pathlib import Path
 from typing import Optional, Union
+from urllib.parse import urlparse
+
+from src.config import DATA_URL_SALES, DATA_URL_STORE
 
 __all__ = [
     "load_sales",
@@ -14,18 +17,70 @@ __all__ = [
 
 # ---------- IO ----------
 
-def _as_path(p: str | Path) -> Path:
-    return Path(p)
+def _as_path_or_url(p: str | Path) -> str | Path:
+    """
+    Return URL strings unchanged; otherwise return a filesystem Path.
+
+    - Trims whitespace.
+    - http(s) URLs must include a host; raises ValueError if missing.
+    - file:// URLs are converted to Path.
+    - Windows drive paths like C:/... or C:\\... are detected and converted to Path.
+    - UNC paths starting with // or \\\\ are treated as Path.
+    - Other schemes (e.g., s3://, gs://) are passed through for pandas/fsspec to handle.
+    - Plain strings without a scheme are treated as local paths.
+    """
+    s = str(p).strip()
+    if not s:
+        raise ValueError("data_load._as_path_or_url: got empty path/URL.")
+
+    # UNC/network share paths
+    if s.startswith(("//", "\\\\")):
+        return Path(s)
+
+    # Windows drive letter paths (e.g., C:/..., D:\...)
+    if len(s) >= 2 and s[1] == ":" and s[0].isalpha():
+        return Path(s)
+
+    parsed = urlparse(s)
+
+    # http(s) — must have a host
+    if parsed.scheme in ("http", "https"):
+        if not parsed.netloc:
+            raise ValueError(f"data_load._as_path_or_url: malformed URL (no host): {s!r}")
+        return s
+
+    # file:// -> local path
+    if parsed.scheme == "file":
+        # Typical Windows form: file:///C:/path/to/file.csv
+        path_part = parsed.path
+        if path_part.startswith("/") and len(path_part) >= 3 and path_part[2] == ":" and path_part[1].isalpha():
+            path_part = path_part.lstrip("/")
+        return Path(path_part)
+
+    # Other schemes (e.g., s3, gs): let pandas/fsspec handle
+    if parsed.scheme:
+        return s
+
+    # No scheme: treat as local path
+    return Path(s)
 
 def load_sales(sales_csv: str | Path) -> pd.DataFrame:
-    """Read sales CSV with parsed dates."""
-    p = _as_path(sales_csv)
-    return pd.read_csv(p, parse_dates=["Date"], low_memory=False)
+    """
+    Read sales CSV with parsed dates.
+
+    NOTE: For simplicity/stability this loader ignores the sales_csv argument
+    and always reads from src.config.DATA_URL_SALES.
+    """
+    return pd.read_csv(DATA_URL_SALES, parse_dates=["Date"], low_memory=False)
 
 def load_store_raw(store_csv: str | Path) -> pd.DataFrame:
-    """Read store CSV as-is (no imputations)."""
-    p = _as_path(store_csv)
-    return pd.read_csv(p)
+    """
+    Read store CSV as-is (no imputations).
+
+    NOTE: For simplicity/stability this loader ignores the store_csv argument
+    and always reads from src.config.DATA_URL_STORE.
+    """
+    return pd.read_csv(DATA_URL_STORE)
 
 # ---------- Helpers ----------
 
@@ -192,7 +247,6 @@ def impute_store_promo2(
         & st["Promo2SinceYear"].notna()
     )
     if mask_valid.any():
-        # vectorized-safe apply (small table: one row per store)
         start.loc[mask_valid] = st.loc[mask_valid, ["Promo2SinceYear","Promo2SinceWeek"]].apply(
             lambda r: pd.Timestamp.fromisocalendar(int(r["Promo2SinceYear"]), int(r["Promo2SinceWeek"]), 1),
             axis=1

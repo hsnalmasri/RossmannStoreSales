@@ -5,7 +5,7 @@ import numpy as np
 from pathlib import Path
 from typing import Tuple, Optional
 
-from src.rossmann.data_load import load_sales, load_store_imputed
+from src.data_load import load_sales, load_store_imputed
 
 __all__ = ["load_rossmann_data"]
 

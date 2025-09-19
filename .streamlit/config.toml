@@ -1,6 +1,6 @@
-[server]
-headless = true
-runOnSave = true
-
 [theme]
-base = "dark"
+base="dark"
+primaryColor="#6aa84f"
+backgroundColor="#0e1117"
+secondaryBackgroundColor="#262730"
+textColor="#fafafa"

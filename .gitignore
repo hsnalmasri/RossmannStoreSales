@@ -1,14 +1,21 @@
 # Python
 __pycache__/
 *.pyc
-.venv/
-.env
-.ipynb_checkpoints/
+*.pyo
+*.pyd
+*.egg-info/
+.eggs/
 
-# Data / models
-data/
-models/
-reports/
+# Envs / IDE
+.venv/
+venv/
+env/
+.idea/
+.vscode/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# OS
+.DS_Store
+Thumbs.db
