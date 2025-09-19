@@ -5,7 +5,7 @@ from typing import Optional
 import pandas as pd
 import plotly.graph_objs as go
 
-from models.ets import fit_ets_manual, fit_ets_and_forecast
+from src.models.ets import fit_ets_manual, fit_ets_and_forecast
 
 __all__ = ["make_backtest_fig", "make_forecast_fig"]
 
