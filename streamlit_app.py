@@ -6,44 +6,54 @@ st.set_page_config(page_title="Rossmann Demand Planning", page_icon="🏪", layo
 
 st.title("Rossmann Store Sales — Demand Planning")
 st.write(
-    "Use the sidebar to open pages. The **Exponential Smoothing (ETS)** page lets you tune "
+    "Use the sidebar to switch pages. The **Exponential Smoothing (ETS)** view lets you tune "
     "parameters, run a **backtest** on monthly data, and generate a **forward forecast**."
 )
 
-def _safe_page_link():
-    """Try page_link; if it fails, try switch_page; else show a plain markdown item."""
-    shown = False
-    # 1) Try st.page_link (Streamlit ≥ 1.31) — may fail in some environments
-    if hasattr(st, "page_link"):
-        try:
-            st.page_link("pages/1_Exponential_Smoothing.py", label="📈 Exponential Smoothing (ETS)")
-            shown = True
-        except Exception:
-            shown = False
-    # 2) Fallback: button + switch_page
-    if not shown:
-        col1, _ = st.columns([1, 3])
-        with col1:
-            if st.button("📈 Open Exponential Smoothing (ETS)"):
-                if hasattr(st, "switch_page"):
-                    try:
-                        st.switch_page("pages/1_Exponential_Smoothing.py")
-                    except Exception:
-                        # Last resort: do nothing; Streamlit will still list the page in its built-in sidebar
-                        pass
-                # If no switch_page, we just rely on the built-in multi-page sidebar
-    # 3) Always render a plain list item so something is visible
-    st.markdown("- 📈 Exponential Smoothing (ETS) — also available in the left sidebar pages list.")
-
-# --- Sidebar quick nav ---
+# -------------------------
+# Sidebar: radio navigation
+# -------------------------
 with st.sidebar:
-    st.header("Pages")
-    _safe_page_link()
+    st.header("Navigation")
+    page = st.radio(
+        "Select a page",
+        options=["Home", "Exponential Smoothing (ETS)"],
+        index=0,
+        label_visibility="collapsed",
+    )
 
-st.markdown(
-    """
+# -------------------------
+# Simple router
+# -------------------------
+if page == "Home":
+    st.markdown(
+        """
 ### Pages
-Below are the available pages in this app:
+- 📈 **Exponential Smoothing (ETS):** backtest & forward forecast on monthly-aggregated sales.
+
+> More pages coming soon (segmentation, promo impact, competition effects, etc.).
 """
-)
-_safe_page_link()
+    )
+    # Optional quick action button
+    col, _ = st.columns([1, 3])
+    with col:
+        if st.button("Go to Exponential Smoothing (ETS)"):
+            if hasattr(st, "switch_page"):
+                try:
+                    st.switch_page("pages/1_Exponential_Smoothing.py")
+                except Exception:
+                    st.info("Couldn't switch via `switch_page`. Use the sidebar to open the page.")
+            else:
+                st.info("This Streamlit version doesn't support `switch_page`. Use the left sidebar pages list.")
+
+elif page == "Exponential Smoothing (ETS)":
+    if hasattr(st, "switch_page"):
+        try:
+            st.switch_page("pages/1_Exponential_Smoothing.py")
+        except Exception:
+            st.error("Navigation failed. Open the page from the default sidebar list on the left.")
+    else:
+        st.info(
+            "Your Streamlit version doesn't support `switch_page`. "
+            "Please open **pages/1_Exponential_Smoothing.py** from the built-in sidebar pages list."
+        )
