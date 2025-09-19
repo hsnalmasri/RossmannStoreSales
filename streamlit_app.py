@@ -31,7 +31,7 @@ def load_monthly_series():
         loader = _try_attr(
             DL,
             "load_store_imputed",  # you said this exists
-            "load_imputed",        # earlier mention
+            "load_store_imputed",        # earlier mention
             "load_raw",            # fallback
         )
         if loader:
