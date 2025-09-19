@@ -6,48 +6,99 @@ from pathlib import Path
 
 # Local modules
 from monthly_forecast import (
-    load_prepared,
+    load_prepared as _load_prepared_csvs,  # legacy local-path loader
     make_monthly_series,
     fit_arima,
     make_fig_actual_fitted_forecast,
 )
-
-# Try both import styles for ETS helper (flat file or models package)
-try:
-    from ets_stepwise import fit_and_backtest_ets
-except Exception:
-    try:
-        from models.ets_stepwise import fit_and_backtest_ets  # type: ignore
-    except Exception as _e:
-        fit_and_backtest_ets = None  # handled later
+from ets_stepwise import fit_and_backtest_ets
 
 st.set_page_config(page_title='Rossmann Monthly Forecast', layout='wide')
 
-st.title('Rossmann Monthly Forecasts')
+st.title('Rossmann Monthly Forecast Dashboard')
 
+# -----------------------------
+# Data source controls
+# -----------------------------
 with st.sidebar:
-    st.header('Data Inputs')
-    sales_path = st.text_input('SalesData.csv path', 'data/RAW/SalesData.csv')
-    store_path = st.text_input('StoreData.csv path', 'data/RAW/StoreData.csv')
+    st.header('Data Source')
+    src = st.radio('Load data from', ['Secrets URLs', 'Local paths'], index=0)
+
+    if src == 'Local paths':
+        sales_path = st.text_input('SalesData.csv path', 'data/RAW/SalesData.csv')
+        store_path = st.text_input('StoreData.csv path', 'data/RAW/StoreData.csv')
+    else:
+        st.caption('Reading from Streamlit secrets (see `.streamlit/secrets.toml`).')
+        # Optional preview of the domain only (don’t print full URLs if you don’t want to)
+        try:
+            _su = st.secrets['data'].get('sales_url', '')
+            _tu = st.secrets['data'].get('store_url', '')
+            if _su:
+                st.write('Sales URL domain:', pd.io.common.urlparse(_su).netloc)
+            if _tu:
+                st.write('Store URL domain:', pd.io.common.urlparse(_tu).netloc)
+        except Exception:
+            st.info('Add keys data.sales_url and data.store_url to secrets.')
 
     st.header('Series Build')
     agg_choice = st.radio('Monthly aggregation', ['sum', 'mean'], index=0, horizontal=True)
 
     st.header('Model')
-    model_choice = st.radio('Choose model', ['ARIMA', 'ETS (Exponential Smoothing)'], index=1)
+    model_choice = st.radio('Model type', ['ARIMA', 'Exponential Smoothing (ETS)'], index=1)
+
+    if model_choice == 'ARIMA':
+        horizon = st.slider('Forecast horizon (months)', 1, 24, 6)
+
+    if model_choice == 'Exponential Smoothing (ETS)':
+        st.subheader('ETS Parameters')
+        k_back = st.slider('Backtest last k steps', 1, 24, 3)
+        k_fut = st.slider('Future forecast steps', 1, 24, 6)
+        trend = st.selectbox('Trend', ['none', 'add'], index=1)
+        seasonal = st.selectbox('Seasonal', ['none', 'add', 'mul'], index=0)
+        m = st.number_input('Seasonal Period (m)', min_value=0, max_value=366, value=12)
+        damped = st.checkbox('Damped Trend', value=True)
+        phi = st.slider('Damping factor (phi)', 0.80, 0.99, 0.95)
+        manual = st.checkbox('Manual α/β/γ (disable to auto-optimize)', value=False)
+        if manual:
+            alpha = st.slider('Alpha (level)', 0.0, 1.0, 0.2)
+            beta = st.slider('Beta (trend)', 0.0, 1.0, 0.1)
+            gamma = st.slider('Gamma (seasonal)', 0.0, 1.0, 0.1)
+        else:
+            alpha = beta = gamma = None
+
+# -----------------------------
+# Data loading (URLs via secrets OR local CSV paths)
+# -----------------------------
 
 @st.cache_data(show_spinner=True)
-def get_df(sales_path: str, store_path: str) -> pd.DataFrame:
-    return load_prepared(sales_path, store_path, keep_closed_days=True)
+def load_from_urls(sales_url: str, store_url: str, keep_closed_days: bool = True) -> pd.DataFrame:
+    sales = pd.read_csv(sales_url, parse_dates=['Date'], low_memory=False)
+    store = pd.read_csv(store_url)
+    df = sales.merge(store[['Store']], on='Store', how='left')
+    if not keep_closed_days and 'Open' in df.columns:
+        df = df[df['Open'] == 1]
+    return df
 
-# ---- Load data ----
+@st.cache_data(show_spinner=True)
+def load_from_local(sales_path: str, store_path: str) -> pd.DataFrame:
+    # Use existing helper that expects file paths
+    return _load_prepared_csvs(sales_path, store_path, keep_closed_days=True)
+
+# Choose loader based on sidebar selection
 try:
-    df = get_df(sales_path, store_path)
+    if src == 'Secrets URLs':
+        sales_url = st.secrets['data']['sales_url']
+        store_url = st.secrets['data']['store_url']
+        df = load_from_urls(sales_url, store_url, keep_closed_days=True)
+    else:
+        df = load_from_local(sales_path, store_path)
 except Exception as e:
     st.error(f"Failed to load data: {e}")
     st.stop()
 
-# UI: store selection (including All Stores)
+# -----------------------------
+# Series selection and build
+# -----------------------------
 stores = sorted(df['Store'].dropna().unique().tolist())
 store_options = ['All Stores'] + [int(s) for s in stores]
 store_choice = st.selectbox('Store to aggregate', store_options)
@@ -63,7 +114,6 @@ st.caption(f"Observations: **{len(y)}**, last month: **{y.index.max().strftime('
 # =============================
 if model_choice == 'ARIMA':
     with st.spinner('Fitting ARIMA baseline...'):
-        horizon = st.slider('Forecast horizon (months)', 1, 24, 6)
         model = fit_arima(y, seasonal=True, m=12)
         fig = make_fig_actual_fitted_forecast(y, model, horizon=horizon)
 
@@ -77,31 +127,6 @@ if model_choice == 'ARIMA':
 # ETS block (step-wise diff-log pipeline + dual)
 # ==============================================
 else:
-    if fit_and_backtest_ets is None:
-        st.error('ets_stepwise.py is not found. Place it next to monthly_forecast.py or under models/.')
-        st.stop()
-
-    with st.sidebar:
-        st.subheader('Backtest & Forecast steps')
-        k_back = st.slider('Backtest last k steps', 1, 24, 3)
-        k_fut = st.slider('Future forecast steps', 1, 24, 6)
-
-        st.subheader('ETS Structure')
-        trend = st.selectbox('Trend', ['none', 'add'], index=1)
-        damped = st.toggle('Damped trend', value=True)
-        phi = st.slider('Damping φ', 0.80, 0.99, 0.95, 0.01) if damped else None
-        seasonal = st.selectbox('Seasonality', ['none', 'add', 'mul'], index=0)
-        m = st.number_input('Seasonal period m', min_value=0, max_value=366, value=12, step=1)
-
-        st.subheader('Smoothing parameters')
-        manual = st.toggle('Manual α/β/γ (turn off to auto-optimize)', value=False)
-        if manual:
-            alpha = st.slider('α (level)', 0.00, 1.00, 0.30, 0.01)
-            beta  = st.slider('β (trend)', 0.00, 1.00, 0.10, 0.01)
-            gamma = st.slider('γ (seasonal)', 0.00, 1.00, 0.10, 0.01)
-        else:
-            alpha = beta = gamma = None
-
     # Normalize seasonal inputs
     seasonal_kw = None if seasonal == 'none' else seasonal
     m_kw = int(m) if (seasonal_kw is not None and int(m) >= 2) else None
@@ -111,7 +136,7 @@ else:
         res = fit_and_backtest_ets(
             y,
             steps=int(k_back),
-            error_type='A',  # dy often fine with additive error
+            error_type='A',
             trend=trend_kw,
             damped=bool(damped),
             phi=phi,
@@ -120,7 +145,7 @@ else:
             alpha=alpha,
             beta=beta,
             gamma=gamma,
-            optimized=not manual,
+            optimized=(not manual),
         )
 
     # Backtest figure + metrics
@@ -136,8 +161,7 @@ else:
     with st.expander('Backtest table (Actual vs Forecast & AbsError)'):
         st.dataframe(res['tables']['test'])
 
-    # Future forecast (use separate k_fut)
-    # Re-run same config but reuse function output by changing steps
+    # Future forecast
     res_future = fit_and_backtest_ets(
         y,
         steps=int(k_fut),
@@ -150,7 +174,7 @@ else:
         alpha=alpha,
         beta=beta,
         gamma=gamma,
-        optimized=not manual,
+        optimized=(not manual),
     )
 
     st.subheader('Future Forecast')
