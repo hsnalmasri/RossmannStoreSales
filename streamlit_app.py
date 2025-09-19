@@ -17,7 +17,7 @@ with st.sidebar:
     st.header("Navigation")
     page = st.radio(
         "Select a page",
-        options=["Home", "Exponential Smoothing (ETS)"],
+        options=["Exponential Smoothing (ETS)"],
         index=0,
         label_visibility="collapsed",
     )
@@ -25,28 +25,9 @@ with st.sidebar:
 # -------------------------
 # Simple router
 # -------------------------
-if page == "Home":
-    st.markdown(
-        """
-### Pages
-- 📈 **Exponential Smoothing (ETS):** backtest & forward forecast on monthly-aggregated sales.
 
-> More pages coming soon (segmentation, promo impact, competition effects, etc.).
-"""
-    )
-    # Optional quick action button
-    col, _ = st.columns([1, 3])
-    with col:
-        if st.button("Go to Exponential Smoothing (ETS)"):
-            if hasattr(st, "switch_page"):
-                try:
-                    st.switch_page("pages/1_Exponential_Smoothing.py")
-                except Exception:
-                    st.info("Couldn't switch via `switch_page`. Use the sidebar to open the page.")
-            else:
-                st.info("This Streamlit version doesn't support `switch_page`. Use the left sidebar pages list.")
 
-elif page == "Exponential Smoothing (ETS)":
+if page == "Exponential Smoothing (ETS)":
     if hasattr(st, "switch_page"):
         try:
             st.switch_page("pages/1_Exponential_Smoothing.py")
