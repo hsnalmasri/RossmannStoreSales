@@ -1,329 +1,180 @@
-"""
-Exponential Smoothing (ETS) step-wise forecasting module
-- Manual control of ETS hyperparameters from Streamlit
-- Two outputs: (1) backtest plot for last k steps; (2) future forecast plot for k steps
-- Transformation pipeline: log1p -> first difference -> ETS -> iterative reconstruction -> inverse log1p
-- Plotting helpers return Plotly figures with required styles
-
-Public API
-----------
-fit_and_backtest_ets(
-    s: pd.Series,
-    steps: int,
-    error_type: str = "A",           # 'A' or 'M' (controls Box-Cox + multiplicative settings)
-    trend: str | None = "add",        # 'add' | None
-    damped: bool = True,
-    phi: float | None = None,         # 0.8..0.99 typical, if damped
-    seasonal: str | None = None,      # 'add' | 'mul' | None
-    m: int | None = None,             # seasonal period
-    alpha: float | None = None,
-    beta: float | None = None,
-    gamma: float | None = None,
-    optimized: bool = True,
-) -> dict
-    returns {
-      'fig_backtest': go.Figure,
-      'fig_forecast': go.Figure,
-      'metrics': { 'MAE': float, 'RMSE': float, 'MAPE': float },
-      'tables': { 'test': pd.DataFrame, 'future': pd.DataFrame }
-    }
-
-Notes
------
-• We fit ETS on the differenced log1p series (dy). ETS can model this stationary-ish series well.
-• For k-step forecasts we iterate: y_hat_t = y_prev + dy_hat_t; level = expm1(y_hat_t).
-• Backtest holds out the last `steps` points of the ORIGINAL series.
-"""
-from __future__ import annotations
-import math
-from dataclasses import dataclass
-from typing import Optional, Literal
-
+# ets_stepwise.py
 import numpy as np
 import pandas as pd
-import plotly.graph_objects as go
+from typing import Optional, Dict, Any
 from statsmodels.tsa.holtwinters import ExponentialSmoothing
 
-# -------------------------------
-# Utilities: metrics & transforms
-# -------------------------------
 
-def _safe_mape(y_true: np.ndarray, y_pred: np.ndarray) -> float:
-    y_true = np.asarray(y_true, dtype=float)
-    y_pred = np.asarray(y_pred, dtype=float)
-    mask = y_true != 0
-    if mask.sum() == 0:
-        return float("nan")
-    return np.mean(np.abs((y_true[mask] - y_pred[mask]) / y_true[mask])) * 100.0
+class ETSDataError(ValueError):
+    pass
 
 
-def mae(y_true: np.ndarray, y_pred: np.ndarray) -> float:
-    return float(np.mean(np.abs(np.asarray(y_true) - np.asarray(y_pred))))
+def _ensure_monthly_index(y: pd.Series) -> pd.Series:
+    if not isinstance(y.index, pd.DatetimeIndex):
+        raise ETSDataError("Input series index must be a pandas.DatetimeIndex.")
+    # Coerce to Month Start if needed
+    if y.index.freq is None:
+        # Try to infer; if still None, resample to monthly start
+        try:
+            y = y.asfreq('MS')
+        except Exception:
+            y = y.resample('MS').sum()
+    elif y.index.freqstr not in ('MS', 'M'):
+        # Normalize to Month Start
+        y = y.asfreq('MS')
+    return y
 
 
-def rmse(y_true: np.ndarray, y_pred: np.ndarray) -> float:
-    return float(np.sqrt(np.mean((np.asarray(y_true) - np.asarray(y_pred)) ** 2)))
+def _apply_transform(y: pd.Series, transform: Optional[str]) -> pd.Series:
+    if transform is None:
+        return y
+    if transform == 'log1p':
+        if (y < 0).any():
+            raise ETSDataError("log1p transform requires non-negative data.")
+        return np.log1p(y)
+    raise ETSDataError(f"Unsupported transform: {transform}")
 
 
-def to_month_str(idx: pd.DatetimeIndex) -> pd.Index:
-    return pd.Index([d.strftime("%b") for d in idx])
+def _inverse_transform(x: pd.Series, transform: Optional[str]) -> pd.Series:
+    if transform is None:
+        return x
+    if transform == 'log1p':
+        return np.expm1(x)
+    return x  # fallback
 
 
-# -------------------------------
-# Transformation pipeline helpers
-# -------------------------------
-
-def log1p_diff(s: pd.Series) -> tuple[pd.Series, pd.Series]:
-    """Return (y, dy) where y = log1p(level), dy = y.diff().dropna()."""
-    y = np.log1p(s.astype(float))
-    dy = y.diff().dropna()
-    return y, dy
-
-
-def invert_stepwise_from_diff(
-    last_y: float,
-    dy_forecast: pd.Series,
-) -> pd.Series:
-    """Iteratively reconstruct y_t from dy forecasts, given last observed y.
-    y_t = y_{t-1} + dy_hat_t.
+def fit_ets_holdout(
+    y: pd.Series,
+    n_forecast: int = 6,
+    *,
+    trend: Optional[str] = "add",              # "add" | "mul" | None
+    seasonal: Optional[str] = "add",           # "add" | "mul" | None
+    seasonal_periods: Optional[int] = 12,
+    damped_trend: bool = False,
+    initialization_method: str = "estimated",
+    optimized: bool = True,
+    smoothing_level: Optional[float] = None,
+    smoothing_trend: Optional[float] = None,
+    smoothing_seasonal: Optional[float] = None,
+    damping_trend: Optional[float] = None,
+    transform: Optional[str] = None,           # None | "log1p"
+    remove_bias: bool = False,
+) -> Dict[str, Any]:
     """
-    vals = []
-    y_prev = last_y
-    for _, dy_t in dy_forecast.items():
-        y_t = y_prev + float(dy_t)
-        vals.append(y_t)
-        y_prev = y_t
-    return pd.Series(vals, index=dy_forecast.index)
+    Fit an ETS model with a simple holdout backtest on the last `n_forecast` periods.
+    Returns data only (no plotting).
 
+    Output dict keys:
+      - 'y_train', 'y_test'
+      - 'fitted' (in-sample one-step-ahead on train)
+      - 'forecast' (out-of-sample length n_forecast)
+      - 'residuals' (train residuals)
+      - 'metrics' (mae/mape/rmse on test if test exists)
+      - 'components' (level, trend, season on model scale)
+      - 'model_info' (config, params, aic/bic, transform)
+    """
+    if not isinstance(y, pd.Series):
+        raise ETSDataError("`y` must be a pandas Series.")
 
-def inv_log1p(y: pd.Series) -> pd.Series:
-    return np.expm1(y)
+    y = y.sort_index()
+    y = _ensure_monthly_index(y)
 
+    if seasonal == "mul" or trend == "mul":
+        if (y <= 0).any():
+            raise ETSDataError("Multiplicative components require strictly positive data.")
 
-# -------------------------------
-# ETS fitting on differenced series
-# -------------------------------
-@dataclass
-class ETSConfig:
-    error_type: Literal["A", "M"] = "A"
-    trend: Optional[Literal["add", None]] = "add"
-    damped: bool = True
-    phi: Optional[float] = None
-    seasonal: Optional[Literal["add", "mul", None]] = None
-    m: Optional[int] = None
-    alpha: Optional[float] = None
-    beta: Optional[float] = None
-    gamma: Optional[float] = None
-    optimized: bool = True
+    if n_forecast < 0 or n_forecast >= len(y):
+        raise ETSDataError("`n_forecast` must be >= 0 and less than the length of `y`.")
 
+    # Split
+    y_train = y.iloc[:-n_forecast] if n_forecast > 0 else y.copy()
+    y_test = y.iloc[-n_forecast:] if n_forecast > 0 else pd.Series(dtype=y.dtype)
 
-def _fit_ets_on_diff(
-    dy: pd.Series,
-    cfg: ETSConfig,
-):
-    # Map error type to use_boxcox/multiplicative decision for residual variance. For dy, variance is often stable; keep additive.
-    seasonal = cfg.seasonal
-    seasonal_periods = cfg.m if seasonal else None
+    # Apply transform (if any)
+    y_train_t = _apply_transform(y_train, transform)
 
+    # Build and fit model
     model = ExponentialSmoothing(
-        dy,
-        trend=cfg.trend,               # 'add' or None on dy
-        damped_trend=cfg.damped,
-        seasonal=seasonal,             # optional on dy if there is residual seasonality
+        y_train_t,
+        trend=trend,
+        seasonal=seasonal,
         seasonal_periods=seasonal_periods,
-        initialization_method="estimated",
+        damped_trend=damped_trend,
+        initialization_method=initialization_method,
     )
 
     fit = model.fit(
-        smoothing_level=cfg.alpha,
-        smoothing_slope=cfg.beta,
-        smoothing_seasonal=cfg.gamma,
-        damping_trend=cfg.phi,
-        optimized=cfg.optimized,
-    )
-    return fit
-
-
-# -------------------------------
-# Backtest (last k) and future forecast
-# -------------------------------
-
-def fit_and_backtest_ets(
-    s: pd.Series,
-    steps: int,
-    error_type: str = "A",
-    trend: Optional[str] = "add",
-    damped: bool = True,
-    phi: Optional[float] = None,
-    seasonal: Optional[str] = None,
-    m: Optional[int] = None,
-    alpha: Optional[float] = None,
-    beta: Optional[float] = None,
-    gamma: Optional[float] = None,
-    optimized: bool = True,
-):
-    assert steps >= 1, "steps must be >= 1"
-    s = s.dropna().astype(float)
-    if len(s) <= steps + 2:
-        raise ValueError("Not enough data for backtest with requested steps.")
-
-    # Transform
-    y, dy = log1p_diff(s)
-
-    # Define backtest split on ORIGINAL index: last `steps` observations are test
-    split_idx = s.index[-steps - 1]  # we need one extra for the last_y anchor
-
-    s_train = s.loc[:split_idx]
-    s_test = s.loc[split_idx:]
-    # Align to dy: dy starts from second point, so training dy must end at split_idx (exclusive)
-    dy_train = dy.loc[:split_idx].iloc[:-1]
-
-    cfg = ETSConfig(
-        error_type=error_type,
-        trend=(None if trend in (None, "none", "") else "add"),
-        damped=damped,
-        phi=phi,
-        seasonal=(None if seasonal in (None, "none", "") else seasonal),
-        m=m,
-        alpha=alpha,
-        beta=beta,
-        gamma=gamma,
         optimized=optimized,
+        smoothing_level=smoothing_level,
+        smoothing_trend=smoothing_trend,
+        smoothing_seasonal=smoothing_seasonal,
+        damping_trend=damping_trend,
+        remove_bias=remove_bias,
     )
 
-    fit = _fit_ets_on_diff(dy_train, cfg)
+    # In-sample fitted (on model scale), residuals
+    fitted_t = fit.fittedvalues
+    resid_t = fit.resid
 
-    # In-sample fitted dy for training period
-    dy_fitted = pd.Series(fit.fittedvalues, index=dy_train.index)
+    # Forecast on model scale
+    fcst_t = fit.forecast(n_forecast) if n_forecast > 0 else pd.Series(dtype=y.dtype)
 
-    # Reconstruct fitted level for training window for visualization
-    y_train = np.log1p(s_train)
-    # Start from the second point of y_train to align with dy_fitted
-    y_fitted = y_train.iloc[0] + dy_fitted.cumsum()
-    level_fitted = inv_log1p(y_fitted)
+    # Inverse transform back to original scale (for user consumption)
+    fitted = _inverse_transform(fitted_t, transform)
+    forecast = _inverse_transform(fcst_t, transform)
+    residuals = y_train - fitted.reindex(y_train.index, fill_value=np.nan)
 
-    # Step-wise forecast for `steps` on dy, then invert
-    dy_fc = fit.forecast(steps)
-    # anchor y at the last observed point BEFORE the test window
-    last_y = y.loc[split_idx]
-    y_fc = invert_stepwise_from_diff(last_y, dy_fc)
-    level_fc = inv_log1p(y_fc)
+    # Basic metrics on test (if present)
+    metrics = {}
+    if n_forecast > 0 and len(y_test) == n_forecast:
+        # Align forecast index to y_test if needed
+        forecast = forecast.set_axis(y_test.index)
+        err = y_test - forecast
+        mae = err.abs().mean()
+        rmse = np.sqrt((err**2).mean())
+        # Safe MAPE (ignore zeros)
+        mask = y_test != 0
+        mape = (err[mask].abs() / y_test[mask]).mean() * 100 if mask.any() else np.nan
+        metrics = {"mae": float(mae), "rmse": float(rmse), "mape": float(mape)}
 
-    # Build test target for comparison (exclude the anchor point) - FIXED
-    # Use iloc to get positional indexing, then convert back to datetime indexing
-    split_pos = s.index.get_loc(split_idx)
-    s_test_eval = s.iloc[split_pos + 1:split_pos + 1 + steps]
-
-    # Metrics
-    metrics = {
-        "MAE": mae(s_test_eval.values, level_fc.values),
-        "RMSE": rmse(s_test_eval.values, level_fc.values),
-        "MAPE": _safe_mape(s_test_eval.values, level_fc.values),
+    # Components (note: components are on model scale; we keep them as-is)
+    components = {
+        "level": getattr(fit, "level", None),
+        "trend": getattr(fit, "trend", None),
+        "season": getattr(fit, "season", None),
     }
 
-    # Future forecast from the very end
-    dy_fit_full = _fit_ets_on_diff(dy, cfg)
-    dy_future = dy_fit_full.forecast(steps)
-    last_y_full = y.iloc[-1]
-    y_future = invert_stepwise_from_diff(last_y_full, dy_future)
-    level_future = inv_log1p(y_future)
-
-    # --------------------
-    # Plotly: Backtest fig
-    # --------------------
-    fig_back = go.Figure()
-
-    # Actual (solid with markers)
-    fig_back.add_trace(go.Scatter(
-        x=s.index, y=s.values, mode="lines+markers",
-        name="Actual", line=dict(dash="solid"),
-    ))
-
-    # Fitted (dashed) over train region except the very first anchor point
-    fig_back.add_trace(go.Scatter(
-        x=level_fitted.index, y=level_fitted.values,
-        mode="lines", name="Fitted (train)", line=dict(dash="dash")
-    ))
-
-    # Test (solid with markers, different color handled by Plotly)
-    fig_back.add_trace(go.Scatter(
-        x=s_test_eval.index, y=s_test_eval.values,
-        mode="lines+markers", name="Test (holdout)"
-    ))
-
-    # Forecast (dashed)
-    fig_back.add_trace(go.Scatter(
-        x=level_fc.index, y=level_fc.values,
-        mode="lines", name=f"Forecast (k={steps})", line=dict(dash="dash")
-    ))
-
-    fig_back.update_layout(
-        title=f"ETS Backtest: last {steps} steps",
-        xaxis_title="Date",
-        yaxis_title="Level",
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
-        margin=dict(l=40, r=20, t=60, b=40),
-    )
-
-    # ----------------------------------
-    # Plotly: Future forecast (k steps)
-    # ----------------------------------
-    fig_future = go.Figure()
-    fig_future.add_trace(go.Scatter(
-        x=s.index, y=s.values, mode="lines+markers",
-        name="Actual", line=dict(dash="solid"),
-    ))
-    fig_future.add_trace(go.Scatter(
-        x=level_future.index, y=level_future.values,
-        mode="lines", name=f"Forecast (next {steps})", line=dict(dash="dash")
-    ))
-    fig_future.update_layout(
-        title=f"ETS Future Forecast: next {steps} steps",
-        xaxis_title="Date",
-        yaxis_title="Level",
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
-        margin=dict(l=40, r=20, t=60, b=40),
-    )
-
-    # ----------------------------
-    # Optional: Year-over-year map
-    # ----------------------------
-    # Re-plot actuals by year (x = months Jan..Dec)
-    yoy = (
-        s.copy()
-        .to_frame("value")
-        .assign(year=lambda df: df.index.year, month=lambda df: df.index.strftime("%b"))
-    )
-    # Ensure month order
-    month_order = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]
-    yoy["month"] = pd.Categorical(yoy["month"], categories=month_order, ordered=True)
-    yoy = yoy.sort_values(["year", "month"])  # year-over-year lines
-
-    fig_yoy = go.Figure()
-    for yr, dfy in yoy.groupby("year"):
-        fig_yoy.add_trace(go.Scatter(
-            x=dfy["month"], y=dfy["value"], mode="lines+markers", name=str(yr)
-        ))
-    fig_yoy.update_layout(
-        title="Actuals by Month (YoY overlay)",
-        xaxis_title="Month",
-        yaxis_title="Level",
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
-        margin=dict(l=40, r=20, t=60, b=40),
-    )
-
-    # Tables for Streamlit display if needed
-    test_tbl = pd.DataFrame({
-        "Actual": s_test_eval,
-        "Forecast": level_fc,
-        "AbsError": (s_test_eval - level_fc).abs(),
-    })
-    fut_tbl = pd.DataFrame({"Forecast": level_future})
+    model_info = {
+        "aic": getattr(fit, "aic", None),
+        "bic": getattr(fit, "bic", None),
+        "sse": getattr(fit, "sse", None),
+        "params": {
+            "alpha": getattr(fit, "model", None) and fit.params.get("smoothing_level"),
+            "beta": getattr(fit, "model", None) and fit.params.get("smoothing_trend"),
+            "gamma": getattr(fit, "model", None) and fit.params.get("smoothing_seasonal"),
+            "phi": getattr(fit, "model", None) and fit.params.get("damping_trend"),
+        },
+        "config": {
+            "trend": trend,
+            "seasonal": seasonal,
+            "seasonal_periods": seasonal_periods,
+            "damped_trend": damped_trend,
+            "initialization_method": initialization_method,
+            "optimized": optimized,
+            "remove_bias": remove_bias,
+            "transform": transform,
+            "n_forecast": n_forecast,
+        },
+        "model_scale": "log1p" if transform == "log1p" else "raw",
+    }
 
     return {
-        "fig_backtest": fig_back,
-        "fig_forecast": fig_future,
-        "fig_yoy": fig_yoy,
+        "y_train": y_train,
+        "y_test": y_test,
+        "fitted": fitted,
+        "forecast": forecast,
+        "residuals": residuals,
         "metrics": metrics,
-        "tables": {"test": test_tbl, "future": fut_tbl},
+        "components": components,
+        "model_info": model_info,
     }
