@@ -4,6 +4,11 @@ from typing import Optional
 import pandas as pd
 import plotly.graph_objs as go
 
+from ets_plots import (  # noqa: F401
+    make_backtest_fig,
+    make_forecast_fig,
+)
+
 from src.models.ets import fit_ets_manual
 
 __all__ = ["make_backtest_fig", "make_forecast_fig"]

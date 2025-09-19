@@ -1,0 +1,174 @@
+from __future__ import annotations
+
+import logging
+from typing import Dict, Optional
+
+import pandas as pd
+from statsmodels.tsa.holtwinters import ExponentialSmoothing
+
+logger = logging.getLogger(__name__)
+
+
+__all__ = ["fit_ets_manual"]
+
+
+def _ensure_freq(
+    y: pd.Series,
+    fallback: str = "D",
+) -> pd.Series:
+    """
+    Ensure series has a fixed frequency for statsmodels.
+    Tries to infer; if it fails, falls back to `fallback`.
+    """
+    if not isinstance(y.index, pd.DatetimeIndex):
+        raise TypeError(
+            "ets.fit_ets_manual: y must have a pandas.DatetimeIndex (got "
+            f"{type(y.index).__name__})."
+        )
+    if y.empty:
+        raise ValueError("ets.fit_ets_manual: got empty series.")
+
+    # Try to infer a stable frequency
+    inferred = pd.infer_freq(y.index)
+    freq = inferred or fallback
+    y2 = y.asfreq(freq)
+
+    return y2
+
+
+def fit_ets_manual(
+    y: pd.Series,
+    horizon: int,
+    *,
+    trend: Optional[str] = "add",  # None | "add" | "mul"
+    seasonal: Optional[str] = "add",  # None | "add" | "mul"
+    seasonal_periods: int = 7,
+    damped_trend: bool = False,
+    use_boxcox: Optional[bool | str] = None,
+    initialization_method: str = "estimated",
+    freq_fallback: str = "D",
+) -> Dict[str, pd.Series]:
+    """
+    Fit an ETS (Holt-Winters) model and forecast.
+
+    Returns
+    -------
+    dict
+        {'fitted': Series, 'forecast': Series, 'residuals': Series}
+
+    Parameters
+    ----------
+    y : pd.Series
+        Time series with DatetimeIndex. Values must be numeric.
+        (No timezone; models layer should not do I/O/Streamlit.)
+    horizon : int
+        Forecast steps ahead.
+    trend : {'add','mul',None}, default 'add'
+        Trend component type.
+    seasonal : {'add','mul',None}, default 'add'
+        Seasonal component type.
+    seasonal_periods : int, default 7
+        Seasonal period length (e.g. 7 for weekly on daily data).
+    damped_trend : bool, default False
+        Whether to use a damped trend.
+    use_boxcox : bool | 'log' | None, default None
+        Box-Cox transform option passed to statsmodels.
+    initialization_method : str, default 'estimated'
+        Initialization method for ETS (statsmodels param).
+    freq_fallback : str, default 'D'
+        If y has no inferable freq, fall back to this (e.g., 'D' for daily).
+
+    Notes
+    -----
+    - Pure function: no plotting or Streamlit.
+    - Validates inputs and raises explicit errors for faster debugging.
+    """
+    if not isinstance(horizon, int) or horizon <= 0:
+        raise ValueError("ets.fit_ets_manual: horizon must be a positive integer.")
+
+    # Ensure fixed frequency
+    y = _ensure_freq(y, fallback=freq_fallback)
+
+    # Guard against NaNs after asfreq (gaps become NaN)
+    if y.isna().any():
+        # Keep it simple: fill short gaps forward, then backward for head gaps
+        y = y.ffill(limit=7).bfill(limit=7)
+        if y.isna().any():
+            raise ValueError(
+                "ets.fit_ets_manual: y still contains NaNs after gap-filling. "
+                "Please impute upstream in data_prep."
+            )
+
+    logger.info(
+        "ETS fit start: n=%d, freq=%s, trend=%s, seasonal=%s, sp=%s, damped=%s",
+        len(y),
+        y.index.freqstr if getattr(y.index, "freqstr", None) else "unknown",
+        trend,
+        seasonal,
+        seasonal_periods,
+        damped_trend,
+    )
+
+    # Build and fit model
+    try:
+        model = ExponentialSmoothing(
+            y,
+            trend=trend,
+            damped_trend=damped_trend,
+            seasonal=seasonal,
+            seasonal_periods=seasonal_periods if seasonal else None,
+            initialization_method=initialization_method,
+            use_boxcox=use_boxcox,
+        )
+        fit_res = model.fit()
+    except Exception as exc:  # noqa: BLE001 (explicitly convert to helpful msg)
+        raise RuntimeError(
+            f"ets.fit_ets_manual: statsmodels failed to fit ETS. Details: {exc}"
+        ) from exc
+
+    # Forecast
+    try:
+        fcast = fit_res.forecast(horizon)
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError(
+            f"ets.fit_ets_manual: forecast failed. Details: {exc}"
+        ) from exc
+
+    fitted = pd.Series(fit_res.fittedvalues, index=y.index, name="fitted")
+    residuals = (y - fitted).rename("residuals")
+
+    # Ensure forecast index continues the original frequency
+    if getattr(y.index, "freq", None) is not None:
+        fcast.index.freq = y.index.freq  # type: ignore[attr-defined]
+
+    out = {
+        "fitted": fitted.astype(float),
+        "forecast": pd.Series(fcast, index=fcast.index, name="forecast").astype(float),
+        "residuals": residuals.astype(float),
+    }
+
+    logger.info(
+        "ETS fit done: AIC=%.3f, SSE=%.3f",
+        getattr(fit_res, "aic", float("nan")),
+        float((residuals**2).sum()),
+    )
+
+    return out
+
+
+if __name__ == "__main__":
+    # Smoke test with synthetic weekly-seasonal daily data
+    rng = pd.date_range("2022-01-01", periods=300, freq="D")
+    s = pd.Series(
+        50
+        + 0.1 * pd.RangeIndex(300).values
+        + 10 * pd.Series(range(300)).apply(lambda i: ((i % 7) in (5, 6))).astype(int)
+        + 2.5,  # small offset
+        index=rng,
+        dtype="float64",
+    )
+
+    res = fit_ets_manual(s, horizon=14, seasonal_periods=7)
+    assert set(res.keys()) == {"fitted", "forecast", "residuals"}
+    assert len(res["forecast"]) == 14
+    print("OK: ETS manual fit -> forecast head:\n", res["forecast"].head())
